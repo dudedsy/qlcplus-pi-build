@@ -63,10 +63,11 @@ jobs:
           mk-build-deps --install --remove \
             --tool 'apt-get -y --no-install-recommends' \
             "$GITHUB_WORKSPACE/src/debian/control"
-          # Not in upstream's Build-Depends, but translate.sh needs lrelease
-          # and lupdate, which Debian ships in qt6-l10n-tools.
-          apt-get install -y --no-install-recommends qt6-l10n-tools
-          ls -l /usr/lib/qt6/bin/lrelease /usr/lib/qt6/bin/lupdate
+          # Needed by the 5.3.0 CMake files but missing from upstream's
+          # debian/control: cmake itself, Qt Svg, and lrelease/lupdate
+          # (Debian ships those in qt6-l10n-tools).
+          apt-get install -y --no-install-recommends \
+            cmake qt6-svg-dev qt6-l10n-tools
 
       - name: Build packages
         working-directory: src
