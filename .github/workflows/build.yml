@@ -151,10 +151,11 @@ jobs:
         run: |
           VER="${QLC_TAG#QLC+_}"
           REL="qlcplus-${FLAVOUR}-${VER}-trixie-arm64"
+          if [ "$FLAVOUR" = v5 ]; then PKG=qlcplus5; else PKG=qlcplus; fi
           if gh release view "$REL" --repo "$REPO" >/dev/null 2>&1; then
             gh release upload "$REL" out/* --repo "$REPO" --clobber
           else
             gh release create "$REL" out/* --repo "$REPO" \
               --title "QLC+ $VER ($FLAVOUR) for Raspberry Pi OS Trixie arm64" \
-              --notes "Built from upstream tag \`$QLC_TAG\` with upstream create-deb.sh on a native arm64 runner. Install with: sudo apt install ./qlcplus-data_${VER}_all.deb ./qlcplus5_${VER}_arm64.deb (skip the -dbgsym package unless debugging)"
+              --notes "Built from upstream tag \`$QLC_TAG\` with upstream create-deb.sh on a native arm64 runner. Install with: sudo apt install ./qlcplus-data_${VER}_all.deb ./${PKG}_${VER}_arm64.deb (skip the -dbgsym package unless debugging)"
           fi
