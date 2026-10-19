@@ -28,6 +28,11 @@ permissions:
 env:
   ARTIFACT: qlcplus-${{ inputs.flavour }}-trixie-arm64
 
+# Explicit bash gives -eo pipefail, so a failed build isn't hidden by tee.
+defaults:
+  run:
+    shell: bash
+
 jobs:
   build:
     runs-on: ubuntu-24.04-arm
@@ -58,10 +63,24 @@ jobs:
           mk-build-deps --install --remove \
             --tool 'apt-get -y --no-install-recommends' \
             "$GITHUB_WORKSPACE/src/debian/control"
+          # Not in upstream's Build-Depends, but translate.sh needs lrelease
+          # and lupdate, which Debian ships in qt6-l10n-tools.
+          apt-get install -y --no-install-recommends qt6-l10n-tools
+          ls -l /usr/lib/qt6/bin/lrelease /usr/lib/qt6/bin/lupdate
 
       - name: Build packages
         working-directory: src
-        run: ./create-deb.sh "$FLAVOUR"
+        run: ./create-deb.sh "$FLAVOUR" 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
+
+      # Job logs live on a storage host that isn't always reachable, so also
+      # put the end of the build log in an annotation (readable via the API).
+      - name: Report build failure
+        if: failure()
+        run: |
+          [ -f "$GITHUB_WORKSPACE/build.log" ] || exit 0
+          msg=$(tail -n 60 "$GITHUB_WORKSPACE/build.log" \
+                | sed -e 's/%/%25/g' -e 's/\r/%0D/g' | awk '{printf "%s%%0A", $0}')
+          echo "::error title=Build log tail::$msg"
 
       - name: Collect packages
         run: |
