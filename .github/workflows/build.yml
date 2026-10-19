@@ -156,5 +156,5 @@ jobs:
           else
             gh release create "$REL" out/* --repo "$REPO" \
               --title "QLC+ $VER ($FLAVOUR) for Raspberry Pi OS Trixie arm64" \
-              --notes "Built from upstream tag \`$QLC_TAG\` with upstream create-deb.sh on a native arm64 runner. Install with: sudo apt install ./qlcplus-data_*_all.deb ./qlcplus*_arm64.deb"
+              --notes "Built from upstream tag \`$QLC_TAG\` with upstream create-deb.sh on a native arm64 runner. Install with: sudo apt install ./qlcplus-data_${VER}_all.deb ./qlcplus5_${VER}_arm64.deb (skip the -dbgsym package unless debugging)"
           fi
