@@ -1,0 +1,140 @@
+# Builds QLC+ .deb packages for Raspberry Pi OS Trixie (64-bit), natively on
+# GitHub's arm64 runners, using the upstream Debian packaging and create-deb.sh.
+#
+# Run it from the Actions tab: "Build QLC+ for Pi" -> "Run workflow".
+
+name: Build QLC+ for Pi
+
+on:
+  workflow_dispatch:
+    inputs:
+      qlc_tag:
+        description: Upstream QLC+ git tag to build (see github.com/mcallegari/qlcplus/tags)
+        required: true
+        default: QLC+_5.3.0
+      flavour:
+        description: v5 = QML UI (qlcplus5), v4 = widget UI (qlcplus)
+        type: choice
+        options: [v5, v4]
+        default: v5
+      publish_release:
+        description: Publish the packages as a GitHub Release
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+env:
+  ARTIFACT: qlcplus-${{ inputs.flavour }}-trixie-arm64
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    container: debian:trixie
+    timeout-minutes: 180
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      QLC_TAG: ${{ inputs.qlc_tag }}
+      FLAVOUR: ${{ inputs.flavour }}
+    steps:
+      - name: Install build tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates git build-essential devscripts equivs fakeroot
+
+      - name: Fetch upstream source
+        run: |
+          git clone --depth 1 --branch "$QLC_TAG" \
+            https://github.com/mcallegari/qlcplus.git "$GITHUB_WORKSPACE/src"
+          git -C "$GITHUB_WORKSPACE/src" log -1 --format='Building %H (%cd)'
+
+      - name: Install build dependencies from debian/control
+        # Run outside the source tree so mk-build-deps leftovers don't end up
+        # in the source package.
+        run: |
+          mkdir -p /tmp/deps && cd /tmp/deps
+          mk-build-deps --install --remove \
+            --tool 'apt-get -y --no-install-recommends' \
+            "$GITHUB_WORKSPACE/src/debian/control"
+
+      - name: Build packages
+        working-directory: src
+        run: ./create-deb.sh "$FLAVOUR"
+
+      - name: Collect packages
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          cd "$GITHUB_WORKSPACE"
+          mv ./*.deb out/
+          cp ./*.buildinfo out/ 2>/dev/null || true
+          cd out
+          sha256sum ./*.deb > SHA256SUMS
+          ls -l
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT }}
+          path: out/
+          if-no-files-found: error
+
+  # Install the packages into a clean Trixie arm64 system and check that every
+  # library resolves and the binary starts.
+  smoke-test:
+    needs: build
+    runs-on: ubuntu-24.04-arm
+    container: debian:trixie
+    timeout-minutes: 30
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      FLAVOUR: ${{ inputs.flavour }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT }}
+          path: out
+
+      - name: Install packages
+        run: |
+          apt-get update
+          apt-get install -y ./out/*.deb
+
+      - name: Check libraries and startup
+        run: |
+          if [ "$FLAVOUR" = v5 ]; then BIN=qlcplus5; else BIN=qlcplus; fi
+          echo "Checking $BIN and its plugins for missing libraries"
+          missing=$( { ldd "$(command -v $BIN)"; \
+                       find /usr/lib -path '*qlcplus*' -name '*.so' -exec ldd {} \; ; } \
+                     | grep 'not found' || true)
+          if [ -n "$missing" ]; then echo "$missing"; exit 1; fi
+          QT_QPA_PLATFORM=offscreen timeout 60 "$BIN" --version
+
+  release:
+    needs: smoke-test
+    if: ${{ inputs.publish_release }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      QLC_TAG: ${{ inputs.qlc_tag }}
+      FLAVOUR: ${{ inputs.flavour }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT }}
+          path: out
+
+      - name: Create or update release
+        run: |
+          VER="${QLC_TAG#QLC+_}"
+          REL="qlcplus-${FLAVOUR}-${VER}-trixie-arm64"
+          if gh release view "$REL" --repo "$REPO" >/dev/null 2>&1; then
+            gh release upload "$REL" out/* --repo "$REPO" --clobber
+          else
+            gh release create "$REL" out/* --repo "$REPO" \
+              --title "QLC+ $VER ($FLAVOUR) for Raspberry Pi OS Trixie arm64" \
+              --notes "Built from upstream tag \`$QLC_TAG\` with upstream create-deb.sh on a native arm64 runner. Install with: sudo apt install ./qlcplus-data_*_all.deb ./qlcplus*_arm64.deb"
+          fi
