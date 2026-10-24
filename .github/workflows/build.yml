@@ -75,6 +75,25 @@ jobs:
           apt-get install -y --no-install-recommends \
             cmake qt6-svg-dev qt6-l10n-tools
 
+      # Non-release builds (branches, forks) get their own package version and
+      # changelog date. Without this every build of a branch shares the
+      # upstream version, apt treats them as the same package, and because
+      # Debian pins file timestamps to the changelog date (reproducible builds)
+      # Qt's on-disk QML cache keeps serving the QML of an older build.
+      # "~" sorts below the upstream version, so the real release replaces it.
+      - name: Give non-release builds a unique version
+        if: ${{ !startsWith(inputs.qlc_tag, 'QLC+_') }}
+        working-directory: src
+        run: |
+          CL="debian/changelog-$FLAVOUR"
+          UP=$(dpkg-parsechangelog -l "$CL" -SVersion)
+          SHA=$(git rev-parse --short HEAD)
+          NEWVER="${UP%%-*}~git$(date -u +%Y%m%d%H%M).${SHA}"
+          DEBEMAIL="qlcplus-pi-build <noreply@github.com>" \
+            dch --changelog "$CL" --newversion "$NEWVER" --force-distribution \
+                --distribution stable "Test build of $QLC_REPO $QLC_TAG at $SHA"
+          head -3 "$CL"
+
       - name: Build packages
         working-directory: src
         run: ./create-deb.sh "$FLAVOUR" 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
@@ -172,5 +191,5 @@ jobs:
           else
             gh release create "$REL" out/* --repo "$REPO" $PRE \
               --title "QLC+ $VER ($FLAVOUR) from $QLC_REPO $QLC_TAG, Raspberry Pi OS Trixie arm64" \
-              --notes "Built from \`$QLC_REPO\` \`$QLC_TAG\` (exact commit in SOURCE.txt) with upstream create-deb.sh on a native arm64 runner. Install with: sudo apt install --no-install-recommends ./qlcplus-data_${VER}_all.deb ./${PKG}_${VER}_arm64.deb qt6-svg-plugins qt6-wayland (skip the -dbgsym package unless debugging). Branch builds reuse the upstream version number, so add --reinstall when switching between builds of the same version."
+              --notes "Built from \`$QLC_REPO\` \`$QLC_TAG\` (exact commit in SOURCE.txt) with upstream create-deb.sh on a native arm64 runner. Version ${VER}. Install with: sudo apt install --no-install-recommends ./qlcplus-data_*_all.deb ./${PKG}_*_arm64.deb qt6-svg-plugins qt6-wayland (skip the -dbgsym package unless debugging). Branch and fork builds get a unique ~git version, so a plain install upgrades them."
           fi
