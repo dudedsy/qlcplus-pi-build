@@ -187,6 +187,9 @@ jobs:
           case "$QLC_TAG" in QLC+_*) ;; *) PRE="--prerelease" ;; esac
           REL="qlcplus-${FLAVOUR}-${LABEL}-trixie-arm64"
           if gh release view "$REL" --repo "$REPO" >/dev/null 2>&1; then
+            # drop the previous build's files: new versions have new file names
+            gh release view "$REL" --repo "$REPO" --json assets --jq '.assets[].name' |
+              while read -r a; do gh release delete-asset "$REL" "$a" --repo "$REPO" --yes; done
             gh release upload "$REL" out/* --repo "$REPO" --clobber
           else
             gh release create "$REL" out/* --repo "$REPO" $PRE \
