@@ -120,6 +120,9 @@ jobs:
           cp ./*.buildinfo out/ 2>/dev/null || true
           cp SOURCE.txt out/
           cd out
+          # GitHub turns "~" in asset names into ".": do it here, so the
+          # names in SHA256SUMS match the published files
+          for f in *~*; do [ -e "$f" ] && mv "$f" "${f//\~/.}"; done
           sha256sum ./*.deb > SHA256SUMS
           ls -l
 
