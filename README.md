@@ -19,10 +19,21 @@ plugin resolves, and runs `--version`, then the release.
 ## Install on the Pi
 
 ```
-sudo apt install ./qlcplus-data_5.3.0_all.deb ./qlcplus5_5.3.0_arm64.deb
+sha256sum -c --ignore-missing SHA256SUMS
+cp qlcplus*.deb /tmp/
+sudo apt install --no-install-recommends \
+  /tmp/qlcplus-data_5.3.0_all.deb /tmp/qlcplus5_5.3.0_arm64.deb \
+  qt6-svg-plugins qt6-wayland fonts-dejavu-core
 ```
 
-Check `SHA256SUMS` from the release first.
+- `qt6-svg-plugins` is required: without it every QLC+ 5 icon fails to load
+  ("Unsupported image format") and buttons render blank. The upstream packaging
+  doesn't depend on it, and the smoke test can't catch it because `--version`
+  never loads the UI.
+- `qt6-wayland` is needed to run under a Wayland compositor such as labwc.
+- Installing from `/tmp` avoids apt's harmless "unsandboxed as root" notice.
+- On an 800x480 screen, lower QLC+'s UI scale (app menu → UI Settings →
+  Scaling factor) or the top bar runs off the right edge.
 
 ## Notes
 
