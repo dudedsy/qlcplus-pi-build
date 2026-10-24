@@ -9,9 +9,13 @@ on:
   workflow_dispatch:
     inputs:
       qlc_tag:
-        description: Upstream QLC+ git tag to build (see github.com/mcallegari/qlcplus/tags)
+        description: Git tag or branch to build (e.g. QLC+_5.3.0, master, or a fork's branch)
         required: true
         default: QLC+_5.3.0
+      qlc_repo:
+        description: GitHub repo to build from (owner/name); change only to test a fork
+        required: true
+        default: mcallegari/qlcplus
       flavour:
         description: v5 = QML UI (qlcplus5), v4 = widget UI (qlcplus)
         type: choice
@@ -41,6 +45,7 @@ jobs:
     env:
       DEBIAN_FRONTEND: noninteractive
       QLC_TAG: ${{ inputs.qlc_tag }}
+      QLC_REPO: ${{ inputs.qlc_repo }}
       FLAVOUR: ${{ inputs.flavour }}
     steps:
       - name: Install build tools
@@ -49,11 +54,12 @@ jobs:
           apt-get install -y --no-install-recommends \
             ca-certificates git build-essential devscripts equivs fakeroot
 
-      - name: Fetch upstream source
+      - name: Fetch source
         run: |
           git clone --depth 1 --branch "$QLC_TAG" \
-            https://github.com/mcallegari/qlcplus.git "$GITHUB_WORKSPACE/src"
-          git -C "$GITHUB_WORKSPACE/src" log -1 --format='Building %H (%cd)'
+            "https://github.com/$QLC_REPO.git" "$GITHUB_WORKSPACE/src"
+          git -C "$GITHUB_WORKSPACE/src" log -1 \
+            --format="Building $QLC_REPO $QLC_TAG at %H (%cd)%n%s" | tee "$GITHUB_WORKSPACE/SOURCE.txt"
 
       - name: Install build dependencies from debian/control
         # Run outside the source tree so mk-build-deps leftovers don't end up
@@ -89,6 +95,7 @@ jobs:
           cd "$GITHUB_WORKSPACE"
           mv ./*.deb out/
           cp ./*.buildinfo out/ 2>/dev/null || true
+          cp SOURCE.txt out/
           cd out
           sha256sum ./*.deb > SHA256SUMS
           ls -l
@@ -140,6 +147,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
       QLC_TAG: ${{ inputs.qlc_tag }}
+      QLC_REPO: ${{ inputs.qlc_repo }}
       FLAVOUR: ${{ inputs.flavour }}
     steps:
       - uses: actions/download-artifact@v4
@@ -149,13 +157,20 @@ jobs:
 
       - name: Create or update release
         run: |
-          VER="${QLC_TAG#QLC+_}"
-          REL="qlcplus-${FLAVOUR}-${VER}-trixie-arm64"
+          # Package version comes from the source's debian changelog, not the tag
+          DEB=$(ls out/qlcplus-data_*_all.deb)
+          VER=$(basename "$DEB" | sed -E 's/^qlcplus-data_(.*)_all\.deb$/\1/')
           if [ "$FLAVOUR" = v5 ]; then PKG=qlcplus5; else PKG=qlcplus; fi
+          # Release label: the tag/branch, prefixed with the owner for non-upstream repos
+          LABEL=$(echo "${QLC_TAG#QLC+_}" | tr '/' '-')
+          PRE=""
+          if [ "$QLC_REPO" != mcallegari/qlcplus ]; then LABEL="${QLC_REPO%%/*}-$LABEL"; fi
+          case "$QLC_TAG" in QLC+_*) ;; *) PRE="--prerelease" ;; esac
+          REL="qlcplus-${FLAVOUR}-${LABEL}-trixie-arm64"
           if gh release view "$REL" --repo "$REPO" >/dev/null 2>&1; then
             gh release upload "$REL" out/* --repo "$REPO" --clobber
           else
-            gh release create "$REL" out/* --repo "$REPO" \
-              --title "QLC+ $VER ($FLAVOUR) for Raspberry Pi OS Trixie arm64" \
-              --notes "Built from upstream tag \`$QLC_TAG\` with upstream create-deb.sh on a native arm64 runner. Install with: sudo apt install ./qlcplus-data_${VER}_all.deb ./${PKG}_${VER}_arm64.deb (skip the -dbgsym package unless debugging)"
+            gh release create "$REL" out/* --repo "$REPO" $PRE \
+              --title "QLC+ $VER ($FLAVOUR) from $QLC_REPO $QLC_TAG, Raspberry Pi OS Trixie arm64" \
+              --notes "Built from \`$QLC_REPO\` \`$QLC_TAG\` (exact commit in SOURCE.txt) with upstream create-deb.sh on a native arm64 runner. Install with: sudo apt install --no-install-recommends ./qlcplus-data_${VER}_all.deb ./${PKG}_${VER}_arm64.deb qt6-svg-plugins qt6-wayland (skip the -dbgsym package unless debugging). Branch builds reuse the upstream version number, so add --reinstall when switching between builds of the same version."
           fi
