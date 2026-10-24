@@ -86,13 +86,17 @@ jobs:
         working-directory: src
         run: |
           CL="debian/changelog-$FLAVOUR"
+          PKG=$(dpkg-parsechangelog -l "$CL" -SSource)
           UP=$(dpkg-parsechangelog -l "$CL" -SVersion)
           SHA=$(git rev-parse --short HEAD)
           NEWVER="${UP%%-*}~git$(date -u +%Y%m%d%H%M).${SHA}"
-          DEBEMAIL="qlcplus-pi-build <noreply@github.com>" \
-            dch --changelog "$CL" --newversion "$NEWVER" --force-distribution \
-                --distribution stable "Test build of $QLC_REPO $QLC_TAG at $SHA"
-          head -3 "$CL"
+          # written by hand: dch refuses upstream's changelog while its newest
+          # entry has no change lines yet
+          { printf '%s (%s) stable; urgency=low\n\n  * Test build of %s %s at %s\n\n -- qlcplus-pi-build <noreply@github.com>  %s\n\n' \
+              "$PKG" "$NEWVER" "$QLC_REPO" "$QLC_TAG" "$SHA" "$(date -R)"; cat "$CL"; } > "$CL.new"
+          mv "$CL.new" "$CL"
+          head -6 "$CL"
+          test "$(dpkg-parsechangelog -l "$CL" -SVersion)" = "$NEWVER"
 
       - name: Build packages
         working-directory: src
