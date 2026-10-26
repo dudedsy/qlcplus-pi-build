@@ -2,7 +2,8 @@
 
 Builds [QLC+](https://github.com/mcallegari/qlcplus) `.deb` packages for
 Raspberry Pi OS Trixie (64-bit) on GitHub's free arm64 runners. It uses the
-upstream Debian packaging and `create-deb.sh` unchanged; nothing is patched.
+upstream Debian packaging and `create-deb.sh` unchanged. By default nothing is
+patched; optional patches live in `patches/` (see `patches/README.md`).
 
 ## Build
 
@@ -10,6 +11,9 @@ Actions tab → **Build QLC+ for Pi** → **Run workflow**. Inputs:
 
 - `qlc_tag`: upstream tag, e.g. `QLC+_5.3.0`
 - `flavour`: `v5` (QML UI, binary `qlcplus5`) or `v4` (widget UI, binary `qlcplus`)
+- `qlc_repo`: source repo, default `mcallegari/qlcplus` (change only to test a fork)
+- `patches`: optional, space-separated file names from `patches/` to apply,
+  e.g. `universe-tick-direct.patch`. Patched builds get their own version and prerelease.
 - `publish_release`: attach the packages to a GitHub Release
 
 Jobs: build in a `debian:trixie` arm64 container, then a smoke test that

@@ -1,0 +1,421 @@
+diff --git a/engine/src/inputoutputmap.cpp b/engine/src/inputoutputmap.cpp
+index 35eb393..8a5c029 100644
+--- a/engine/src/inputoutputmap.cpp
++++ b/engine/src/inputoutputmap.cpp
+@@ -157,14 +157,12 @@ bool InputOutputMap::addUniverse(quint32 id)
+             while (id > universesCount())
+             {
+                 uni = new Universe(universesCount(), m_grandMaster);
+-                connect(m_doc->masterTimer(), SIGNAL(tickReady()), uni, SLOT(tick()), Qt::QueuedConnection);
+                 connect(uni, SIGNAL(universeWritten(quint32,QByteArray)), this, SIGNAL(universeWritten(quint32,QByteArray)));
+                 m_universeArray.append(uni);
+             }
+         }
+ 
+         uni = new Universe(id, m_grandMaster);
+-        connect(m_doc->masterTimer(), SIGNAL(tickReady()), uni, SLOT(tick()), Qt::QueuedConnection);
+         connect(uni, SIGNAL(universeWritten(quint32,QByteArray)), this, SIGNAL(universeWritten(quint32,QByteArray)));
+         m_universeArray.append(uni);
+     }
+diff --git a/engine/src/mastertimer.cpp b/engine/src/mastertimer.cpp
+index 1b7bcac..376c3af 100644
+--- a/engine/src/mastertimer.cpp
++++ b/engine/src/mastertimer.cpp
+@@ -152,6 +152,22 @@ void MasterTimer::timerTick()
+     timerTickFunctions(universes);
+     timerTickDMXSources(universes);
+ 
++    /* Wake the Universe threads directly from this thread, while the
++     * universe list is still claimed so no universe can be deleted under us.
++     * Universe::tick() only releases a semaphore. A queued signal here would
++     * run tick() in the thread that owns the Universe objects (the main/GUI
++     * thread), which makes DMX output wait for the GUI event loop.
++     *
++     * Not while a project is loading: Doc::loadXML() reconfigures universes
++     * from the main thread without synchronising with the Universe threads,
++     * and the universes used to stay idle during a load anyway, because the
++     * busy main thread could not deliver the queued ticks. */
++    if (doc->loadStatus() != Doc::Loading)
++    {
++        for (Universe *universe : std::as_const(universes))
++            universe->tick();
++    }
++
+     doc->inputOutputMap()->releaseUniverses();
+ 
+     m_beatRequested = false;
+diff --git a/engine/test/CMakeLists.txt b/engine/test/CMakeLists.txt
+index 5b52cd3..e7319f2 100644
+--- a/engine/test/CMakeLists.txt
++++ b/engine/test/CMakeLists.txt
+@@ -60,5 +60,6 @@ add_subdirectory(showrunner)
+ add_subdirectory(track)
+ add_subdirectory(universe)
+ add_subdirectory(universeperf)
++add_subdirectory(universetick)
+ add_subdirectory(video)
+ add_subdirectory(iopluginstub)
+diff --git a/engine/test/universetick/CMakeLists.txt b/engine/test/universetick/CMakeLists.txt
+new file mode 100644
+index 0000000..83647c4
+--- /dev/null
++++ b/engine/test/universetick/CMakeLists.txt
+@@ -0,0 +1,16 @@
++set(module_name "universetick_test")
++
++add_executable(${module_name} WIN32
++    ${module_name}.cpp ${module_name}.h
++)
++target_include_directories(${module_name} PRIVATE
++    ../../../plugins/interfaces
++    ../../src
++)
++
++target_link_libraries(${module_name} PRIVATE
++    Qt${QT_MAJOR_VERSION}::Core
++    Qt${QT_MAJOR_VERSION}::Gui
++    Qt${QT_MAJOR_VERSION}::Test
++    qlcplusengine
++)
+diff --git a/engine/test/universetick/test.sh b/engine/test/universetick/test.sh
+new file mode 100755
+index 0000000..0bf6529
+--- /dev/null
++++ b/engine/test/universetick/test.sh
+@@ -0,0 +1,9 @@
++#!/bin/sh
++export LD_LIBRARY_PATH=../../src
++export DYLD_FALLBACK_LIBRARY_PATH=../../src
++
++if [ -z "$QLC_PLUGIN_DIR" ]; then
++    export QLC_PLUGIN_DIR=../../../plugins/artnet/src
++fi
++
++./universetick_test -maxwarnings 100000 "$@"
+diff --git a/engine/test/universetick/universetick_test.cpp b/engine/test/universetick/universetick_test.cpp
+new file mode 100644
+index 0000000..6db80f7
+--- /dev/null
++++ b/engine/test/universetick/universetick_test.cpp
+@@ -0,0 +1,275 @@
++/*
++  Q Light Controller Plus - Unit test
++  universetick_test.cpp
++
++  Licensed under the Apache License, Version 2.0 (the "License");
++  you may not use this file except in compliance with the License.
++  You may obtain a copy of the License at
++
++      http://www.apache.org/licenses/LICENSE-2.0.txt
++*/
++
++#include <QtTest>
++#include <QMutex>
++#include <QElapsedTimer>
++#include <QThread>
++#include <QXmlStreamReader>
++#include <QSharedPointer>
++
++#include "universetick_test.h"
++#include "inputoutputmap.h"
++#include "genericfader.h"
++#include "fadechannel.h"
++#include "mastertimer.h"
++#include "dmxsource.h"
++#include "universe.h"
++#include "fixture.h"
++#include "doc.h"
++
++/* A DMX source that writes an incrementing counter (1..250) to channel 0 of
++ * universe 0 on every MasterTimer tick, so every universe pass changes the
++ * output and emits universeWritten. */
++class CounterSource final : public DMXSource
++{
++public:
++    CounterSource(Doc *doc, quint32 fxi) : m_doc(doc), m_fxi(fxi) {}
++
++    void writeDMX(MasterTimer *timer, QList<Universe *> ua) override
++    {
++        Q_UNUSED(timer)
++        if (ua.isEmpty())
++            return;
++        Universe *u = ua.at(0);
++        if (m_fader.isNull() || m_universeId != u->id() || m_universe != u)
++        {
++            m_fader = u->requestFader();
++            m_universe = u;
++            m_universeId = u->id();
++        }
++        const uchar v = m_value;
++        m_fader->updateChannel(m_doc, u, m_fxi, 0, [v](FadeChannel &fc)
++        {
++            fc.setCurrent(v);
++            fc.setTarget(v);
++        });
++        m_value = (m_value % 250) + 1;
++    }
++
++    void reset() { m_fader.clear(); m_universe = nullptr; }
++
++private:
++    Doc *m_doc;
++    quint32 m_fxi;
++    QSharedPointer<GenericFader> m_fader;
++    Universe *m_universe = nullptr;
++    quint32 m_universeId = 0;
++    uchar m_value = 1;
++};
++
++struct Recorder
++{
++    QMutex mutex;
++    QElapsedTimer clock;
++    QVector<qint64> times;   // ns since clock start
++    void record()
++    {
++        QMutexLocker l(&mutex);
++        times.append(clock.nsecsElapsed());
++    }
++};
++
++void UniverseTick_Test::outputCadenceWhileMainThreadBusy()
++{
++    Doc doc(this);
++    Fixture *fxi = new Fixture(&doc);
++    fxi->setUniverse(0);
++    fxi->setAddress(0);
++    fxi->setChannels(1);
++    QVERIFY(doc.addFixture(fxi));
++
++    Recorder rec;
++    rec.clock.start();
++    Universe *u0 = doc.inputOutputMap()->universes().at(0);
++    // DirectConnection: runs in the Universe thread, timestamps each output pass
++    connect(u0, &Universe::universeWritten, this, [&rec](quint32 idx, const QByteArray &) {
++        if (idx == 0)
++            rec.record();
++    }, Qt::DirectConnection);
++
++    CounterSource src(&doc, fxi->id());
++    doc.masterTimer()->registerDMXSource(&src);
++    doc.inputOutputMap()->startUniverses();
++    doc.masterTimer()->start();
++
++    QTest::qWait(500);                      // settle
++
++    const qint64 blockStart = rec.clock.nsecsElapsed();
++    QThread::msleep(500);                   // main thread busy: no event processing
++    const qint64 blockEnd = rec.clock.nsecsElapsed();
++
++    QTest::qWait(500);
++
++    doc.masterTimer()->stop();
++    doc.masterTimer()->unregisterDMXSource(&src);
++
++    QVector<qint64> t;
++    {
++        QMutexLocker l(&rec.mutex);
++        t = rec.times;
++    }
++
++    // passes inside the busy window (skip the first 40 ms), longest gap, and
++    // passes in the 60 ms right after it (a burst means queued ticks piled up)
++    int during = 0, after = 0;
++    qint64 maxGap = 0;
++    for (int i = 0; i < t.size(); i++)
++    {
++        if (t[i] > blockStart + 40000000 && t[i] < blockEnd)
++            during++;
++        if (t[i] >= blockEnd && t[i] < blockEnd + 60000000)
++            after++;
++        if (i > 0 && t[i] > blockStart && t[i - 1] < blockEnd)
++            maxGap = qMax(maxGap, t[i] - t[i - 1]);
++    }
++    qInfo("output passes total %d; during 460 ms main-thread block: %d (expect ~23);"
++          " longest gap across the block %.1f ms; passes in 60 ms after the block: %d",
++          int(t.size()), during, maxGap / 1e6, after);
++
++    QVERIFY2(during >= 15, "universe output stopped while the main thread was busy");
++    QVERIFY2(maxGap < 100000000, "gap of 100 ms or more in universe output");
++}
++
++void UniverseTick_Test::addRemoveUniversesWhileTicking()
++{
++    Doc doc(this);
++    InputOutputMap *iom = doc.inputOutputMap();
++    iom->startUniverses();
++    doc.masterTimer()->start();
++
++    QElapsedTimer t;
++    t.start();
++    int cycles = 0;
++    while (t.elapsed() < 3000)
++    {
++        QVERIFY(iom->addUniverse());
++        iom->startUniverses();
++        QTest::qWait(1);
++        QVERIFY(iom->removeUniverse(iom->universesCount() - 1));
++        cycles++;
++    }
++    doc.masterTimer()->stop();
++    qInfo("%d add/remove cycles while ticking", cycles);
++}
++
++void UniverseTick_Test::fixtureChurnWhileTicking()
++{
++    Doc doc(this);
++    Fixture *probe = new Fixture(&doc);
++    probe->setUniverse(0);
++    probe->setAddress(0);
++    probe->setChannels(1);
++    QVERIFY(doc.addFixture(probe));
++
++    Recorder rec;
++    rec.clock.start();
++    Universe *u0 = doc.inputOutputMap()->universes().at(0);
++    connect(u0, &Universe::universeWritten, this, [&rec](quint32 idx, const QByteArray &) {
++        if (idx == 0)
++            rec.record();
++    }, Qt::DirectConnection);
++
++    CounterSource src(&doc, probe->id());
++    doc.masterTimer()->registerDMXSource(&src);
++    doc.inputOutputMap()->startUniverses();
++    doc.masterTimer()->start();
++    QTest::qWait(200);
++
++    // main thread busy for ~2 s, never returning to the event loop
++    const qint64 churnStart = rec.clock.nsecsElapsed();
++    int ops = 0;
++    while (rec.clock.nsecsElapsed() - churnStart < 2000000000LL)
++    {
++        QList<quint32> ids;
++        for (int i = 0; i < 20; i++)
++        {
++            Fixture *f = new Fixture(&doc);
++            f->setUniverse(0);
++            f->setAddress(10 + i * 8);
++            f->setChannels(8);
++            if (doc.addFixture(f))
++                ids.append(f->id());
++        }
++        for (quint32 id : ids)
++            doc.deleteFixture(id);
++        ops += ids.size() * 2;
++    }
++    const qint64 churnEnd = rec.clock.nsecsElapsed();
++    QTest::qWait(200);
++    doc.masterTimer()->stop();
++    doc.masterTimer()->unregisterDMXSource(&src);
++
++    int during = 0;
++    {
++        QMutexLocker l(&rec.mutex);
++        for (qint64 t : rec.times)
++            if (t > churnStart + 40000000 && t < churnEnd)
++                during++;
++    }
++    qInfo("%d fixture add/delete operations in %.1f s on the main thread;"
++          " universe output passes concurrent with them: %d",
++          ops, (churnEnd - churnStart) / 1e9, during);
++}
++
++void UniverseTick_Test::outputDuringProjectLoad()
++{
++    Doc doc(this);
++    Recorder rec;
++    rec.clock.start();
++    Universe *u0 = doc.inputOutputMap()->universes().at(0);
++    connect(u0, &Universe::universeWritten, this, [&rec](quint32 idx, const QByteArray &) {
++        if (idx == 0)
++            rec.record();
++    }, Qt::DirectConnection);
++
++    // a counter on its own fixture keeps universe 0 changing every tick
++    Fixture *probe = new Fixture(&doc);
++    probe->setUniverse(0);
++    probe->setAddress(511);
++    probe->setChannels(1);
++    QVERIFY(doc.addFixture(probe));
++    CounterSource src(&doc, probe->id());
++    doc.masterTimer()->registerDMXSource(&src);
++    doc.inputOutputMap()->startUniverses();
++    doc.masterTimer()->start();
++    QTest::qWait(200);
++
++    // an Engine section with many generic dimmers (no fixture definitions needed)
++    QString xml = "<Engine>";
++    for (int i = 0; i < 3000; i++)
++        xml += QString("<Fixture><Manufacturer>Generic</Manufacturer><Model>Generic</Model>"
++                       "<Mode>8 Channel</Mode><ID>%1</ID><Name>Dimmer %1</Name>"
++                       "<Universe>%2</Universe><Address>%3</Address><Channels>8</Channels>"
++                       "</Fixture>").arg(i + 100).arg((i / 63) % 4).arg((i % 63) * 8);
++    xml += "</Engine>";
++    QXmlStreamReader reader(xml);
++    reader.readNextStartElement();
++
++    const qint64 loadStart = rec.clock.nsecsElapsed();
++    QVERIFY(doc.loadXML(reader, false));
++    const qint64 loadEnd = rec.clock.nsecsElapsed();
++    QTest::qWait(200);
++    doc.masterTimer()->stop();
++    doc.masterTimer()->unregisterDMXSource(&src);
++
++    int during = 0;
++    {
++        QMutexLocker l(&rec.mutex);
++        for (qint64 t : rec.times)
++            if (t > loadStart + 40000000 && t < loadEnd)
++                during++;
++    }
++    qInfo("Doc::loadXML of 3000 fixtures took %.0f ms; universe output passes during it: %d",
++          (loadEnd - loadStart) / 1e6, during);
++}
++
++QTEST_MAIN(UniverseTick_Test)
+diff --git a/engine/test/universetick/universetick_test.h b/engine/test/universetick/universetick_test.h
+new file mode 100644
+index 0000000..989057d
+--- /dev/null
++++ b/engine/test/universetick/universetick_test.h
+@@ -0,0 +1,40 @@
++/*
++  Q Light Controller Plus - Unit test
++  universetick_test.h
++
++  Licensed under the Apache License, Version 2.0 (the "License");
++  you may not use this file except in compliance with the License.
++  You may obtain a copy of the License at
++
++      http://www.apache.org/licenses/LICENSE-2.0.txt
++*/
++
++#ifndef UNIVERSETICK_TEST_H
++#define UNIVERSETICK_TEST_H
++
++#include <QObject>
++
++class UniverseTick_Test final : public QObject
++{
++    Q_OBJECT
++
++private slots:
++    /* Universe output must keep its cadence while the main (GUI) thread is
++     * busy and not processing events. */
++    void outputCadenceWhileMainThreadBusy();
++
++    /* Universes can be removed and re-added from the main thread while the
++     * MasterTimer is ticking, without crashing. */
++    void addRemoveUniversesWhileTicking();
++
++    /* How many universe output passes run while the main thread is busy
++     * adding and deleting fixtures (which reconfigures Universe channel data
++     * with no lock shared with the Universe thread). */
++    void fixtureChurnWhileTicking();
++
++    /* Universe output passes while Doc::loadXML() runs on the main thread
++     * with the MasterTimer running (how App::loadWorkspace() loads). */
++    void outputDuringProjectLoad();
++};
++
++#endif

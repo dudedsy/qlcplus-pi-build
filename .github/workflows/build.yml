@@ -21,6 +21,10 @@ on:
         type: choice
         options: [v5, v4]
         default: v5
+      patches:
+        description: Patches from this repo's patches/ folder to apply, space-separated (empty = none)
+        required: false
+        default: ''
       publish_release:
         description: Publish the packages as a GitHub Release
         type: boolean
@@ -47,6 +51,7 @@ jobs:
       QLC_TAG: ${{ inputs.qlc_tag }}
       QLC_REPO: ${{ inputs.qlc_repo }}
       FLAVOUR: ${{ inputs.flavour }}
+      PATCHES: ${{ inputs.patches }}
     steps:
       - name: Install build tools
         run: |
@@ -60,6 +65,24 @@ jobs:
             "https://github.com/$QLC_REPO.git" "$GITHUB_WORKSPACE/src"
           git -C "$GITHUB_WORKSPACE/src" log -1 \
             --format="Building $QLC_REPO $QLC_TAG at %H (%cd)%n%s" | tee "$GITHUB_WORKSPACE/SOURCE.txt"
+
+      - name: Check out this repo (for patches)
+        if: ${{ inputs.patches != '' }}
+        uses: actions/checkout@v5
+        with:
+          path: pibuild
+
+      - name: Apply patches
+        if: ${{ inputs.patches != '' }}
+        run: |
+          for p in $PATCHES; do
+            f="$GITHUB_WORKSPACE/pibuild/patches/$p"
+            test -f "$f" || { echo "::error::no such patch: patches/$p"; exit 1; }
+            echo "Applying $p"
+            git -C "$GITHUB_WORKSPACE/src" apply --verbose "$f"
+            echo "Patch: $p ($(sha256sum "$f" | cut -c1-12))" >> "$GITHUB_WORKSPACE/SOURCE.txt"
+          done
+          git -C "$GITHUB_WORKSPACE/src" diff --stat
 
       - name: Install build dependencies from debian/control
         # Run outside the source tree so mk-build-deps leftovers don't end up
@@ -81,8 +104,9 @@ jobs:
       # Debian pins file timestamps to the changelog date (reproducible builds)
       # Qt's on-disk QML cache keeps serving the QML of an older build.
       # "~" sorts below the upstream version, so the real release replaces it.
+      # Patched builds of a release get "+p..." instead (see below).
       - name: Give non-release builds a unique version
-        if: ${{ !startsWith(inputs.qlc_tag, 'QLC+_') }}
+        if: ${{ !startsWith(inputs.qlc_tag, 'QLC+_') || inputs.patches != '' }}
         working-directory: src
         run: |
           CL="debian/changelog-$FLAVOUR"
@@ -90,10 +114,20 @@ jobs:
           UP=$(dpkg-parsechangelog -l "$CL" -SVersion)
           SHA=$(git rev-parse --short HEAD)
           NEWVER="${UP%%-*}~git$(date -u +%Y%m%d%H%M).${SHA}"
+          if [ -n "$PATCHES" ]; then
+            # patch names, reduced to characters allowed in a Debian version
+            PN=$(echo $PATCHES | sed -e 's/\.patch//g' | tr -c 'A-Za-z0-9\n' '.' | tr -d '\n')
+            case "$QLC_TAG" in
+              # a patched release sorts above the plain release ("+"), so it
+              # installs over it, and below the next upstream version
+              QLC+_*) NEWVER="${UP%%-*}+p$(date -u +%Y%m%d%H%M).${PN}" ;;
+              *)      NEWVER="${NEWVER}.p.${PN}" ;;
+            esac
+          fi
           # written by hand: dch refuses upstream's changelog while its newest
           # entry has no change lines yet
           { printf '%s (%s) stable; urgency=low\n\n  * Test build of %s %s at %s\n\n -- qlcplus-pi-build <noreply@github.com>  %s\n\n' \
-              "$PKG" "$NEWVER" "$QLC_REPO" "$QLC_TAG" "$SHA" "$(date -R)"; cat "$CL"; } > "$CL.new"
+              "$PKG" "$NEWVER" "$QLC_REPO" "$QLC_TAG${PATCHES:+ with patches: $PATCHES}" "$SHA" "$(date -R)"; cat "$CL"; } > "$CL.new"
           mv "$CL.new" "$CL"
           head -6 "$CL"
           test "$(dpkg-parsechangelog -l "$CL" -SVersion)" = "$NEWVER"
@@ -175,6 +209,7 @@ jobs:
       QLC_TAG: ${{ inputs.qlc_tag }}
       QLC_REPO: ${{ inputs.qlc_repo }}
       FLAVOUR: ${{ inputs.flavour }}
+      PATCHES: ${{ inputs.patches }}
     steps:
       - uses: actions/download-artifact@v8
         with:
@@ -192,6 +227,10 @@ jobs:
           PRE=""
           if [ "$QLC_REPO" != mcallegari/qlcplus ]; then LABEL="${QLC_REPO%%/*}-$LABEL"; fi
           case "$QLC_TAG" in QLC+_*) ;; *) PRE="--prerelease" ;; esac
+          if [ -n "$PATCHES" ]; then
+            LABEL="${LABEL}-patched-$(echo $PATCHES | sed -e 's/\.patch//g' | tr -c 'A-Za-z0-9\n' '-' | tr -d '\n')"
+            PRE="--prerelease"
+          fi
           REL="qlcplus-${FLAVOUR}-${LABEL}-trixie-arm64"
           if gh release view "$REL" --repo "$REPO" >/dev/null 2>&1; then
             # drop the previous build's files: new versions have new file names
@@ -201,5 +240,5 @@ jobs:
           else
             gh release create "$REL" out/* --repo "$REPO" $PRE \
               --title "QLC+ $VER ($FLAVOUR) from $QLC_REPO $QLC_TAG, Raspberry Pi OS Trixie arm64" \
-              --notes "Built from \`$QLC_REPO\` \`$QLC_TAG\` (exact commit in SOURCE.txt) with upstream create-deb.sh on a native arm64 runner. Version ${VER}. Install with: sudo apt install --no-install-recommends ./qlcplus-data_*_all.deb ./${PKG}_*_arm64.deb qt6-svg-plugins qt6-wayland (skip the -dbgsym package unless debugging). Branch and fork builds get a unique ~git version, so a plain install upgrades them."
+              --notes "Built from \`$QLC_REPO\` \`$QLC_TAG\` (exact commit in SOURCE.txt) with upstream create-deb.sh on a native arm64 runner. Version ${VER}. Install with: sudo apt install --no-install-recommends ./qlcplus-data_*_all.deb ./${PKG}_*_arm64.deb qt6-svg-plugins qt6-wayland (skip the -dbgsym package unless debugging). Branch, fork and patched builds get a unique ~git version, so a plain install upgrades them.${PATCHES:+ Patches applied (see SOURCE.txt): $PATCHES}"
           fi
